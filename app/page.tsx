@@ -64,6 +64,19 @@ type Payment = {
   method: string; reference_number: string | null; paid_at: string;
 };
 
+type ReportData = {
+  summary: {
+    payments_count: number; collected_rwf: number; closed_sessions: number;
+    session_fees_rwf: number; invoices_count: number; invoiced_rwf: number;
+    current_outstanding_rwf: number;
+  };
+  methods: { method: string; count: number; amount_rwf: number }[];
+  recent_payments: { receipt_number: string; amount_rwf: number; method: string; reference_number: string | null; paid_at: string }[];
+  issued_invoices: { invoice_number: string; invoice_type: string; description: string; total_rwf: number; paid_rwf: number; status: string; issued_at: string }[];
+  closed_session_rows: { session_number: number; plate_number: string; started_at: string; ended_at: string; fee_rwf: number }[];
+  outstanding_invoices: { invoice_number: string; invoice_type: string; description: string; total_rwf: number; paid_rwf: number; status: string; due_at: string | null }[];
+};
+
 function calculateParkingFee(start: string, end: string): number {
   const startTime = new Date(start);
   const endTime = new Date(end);
@@ -113,10 +126,22 @@ export default function Home() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [parkingSessions, setParkingSessions] = useState<ParkingSession[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
+  const [report, setReport] = useState<ReportData | null>(null);
+  const [reportDetails, setReportDetails] = useState<'payments' | 'sessions' | 'invoices' | 'outstanding' | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportDates, setReportDates] = useState(() => {
+    const now = new Date();
+    const date = (day: number) => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    return { start: date(1), end: date(now.getDate()) };
+  });
   const [paymentForm, setPaymentForm] = useState({ invoice_id: '', amount_rwf: '', method: 'cash', reference_number: '' });
   const [invoiceSessionId, setInvoiceSessionId] = useState('');
   const [invoicePayLater, setInvoicePayLater] = useState(false);
   const [invoiceMethod, setInvoiceMethod] = useState('cash');
+  const [monthlyForm, setMonthlyForm] = useState(() => {
+    const now = new Date();
+    return { tenant_id: '', period: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`, pay_later: false, method: 'cash' };
+  });
   const [selectedVehicle, setSelectedVehicle] = useState('');
   const [arrivalTime, setArrivalTime] = useState(() => {
   const now = new Date();
@@ -181,6 +206,18 @@ export default function Home() {
   }
 
   useEffect(() => { void loadData(); }, []);
+
+  async function loadReport() {
+    setReportLoading(true); setError(''); setNotice('');
+    try {
+      const data = await api<ReportData>(`/api/reports?start=${encodeURIComponent(reportDates.start)}&end=${encodeURIComponent(reportDates.end)}`);
+      setReport(data);
+      setReportDetails(null);
+      setNotice(`Report updated for ${reportDates.start} through ${reportDates.end}.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not load the report.');
+    } finally { setReportLoading(false); }
+  }
 
   async function addTenant(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -374,6 +411,20 @@ async function recordPayment(e: React.FormEvent<HTMLFormElement>) {
     await loadData();
   } catch (cause) {
     setError(cause instanceof Error ? cause.message : 'Could not record payment.');
+  } finally { setSaving(false); }
+}
+
+async function createMonthlyInvoice(e: React.FormEvent<HTMLFormElement>) {
+  e.preventDefault();
+  setSaving(true); setError(''); setNotice('');
+  try {
+    await api('/api/invoices', { method: 'POST', body: JSON.stringify({
+      invoice_type: 'monthly_tenant', ...monthlyForm,
+    }) });
+    setNotice(monthlyForm.pay_later ? 'Monthly invoice created with an outstanding balance.' : 'Monthly invoice created and payment recorded.');
+    await loadData();
+  } catch (cause) {
+    setError(cause instanceof Error ? cause.message : 'Could not create monthly invoice.');
   } finally { setSaving(false); }
 }
 
@@ -714,12 +765,34 @@ async function recordPayment(e: React.FormEvent<HTMLFormElement>) {
       <button className="primary" disabled={saving || !invoiceSessionId}>{saving ? 'Saving…' : invoicePayLater ? 'Create invoice with balance' : 'Create invoice and record payment'}</button>
     </form>
 
-    <div style={{ overflowX: 'auto' }}>
-      <table>
+    <hr style={{ border: 0, borderTop: '1px solid var(--line)', margin: '24px 0' }} />
+    <h3>Create a monthly tenant invoice</h3>
+    <p>Choose the billing month. Each active tenant can have one monthly invoice for each month.</p>
+    <form onSubmit={createMonthlyInvoice} className="form-grid" style={{ margin: '18px 0 28px' }}>
+      <label>Active tenant
+        <select required value={monthlyForm.tenant_id} onChange={e => setMonthlyForm({ ...monthlyForm, tenant_id: e.target.value })}>
+          <option value="">Choose a tenant</option>
+          {tenants.filter(t => t.status === 'active').map(t => <option key={t.id} value={t.id}>{t.full_name} · {money(Number(t.monthly_rate_rwf))}/month</option>)}
+        </select>
+      </label>
+      <label>Billing month<input type="month" required value={monthlyForm.period} onChange={e => setMonthlyForm({ ...monthlyForm, period: e.target.value })} /></label>
+      {!monthlyForm.pay_later && <label>Payment method
+        <select value={monthlyForm.method} onChange={e => setMonthlyForm({ ...monthlyForm, method: e.target.value })}>
+          <option value="cash">Cash</option><option value="mobile_money">Mobile money</option><option value="bank_transfer">Bank transfer</option><option value="card">Card</option><option value="other">Other</option>
+        </select>
+      </label>}
+      <label className="check-label"><input type="checkbox" checked={monthlyForm.pay_later} onChange={e => setMonthlyForm({ ...monthlyForm, pay_later: e.target.checked })} /> Approve pay later</label>
+      {monthlyForm.pay_later && <p className="muted small">Staff authorization, tenant credit approval, and the tenant’s credit limit apply.</p>}
+      <button className="primary" disabled={saving || !monthlyForm.tenant_id}>{saving ? 'Saving…' : monthlyForm.pay_later ? 'Create monthly invoice with balance' : 'Create monthly invoice and record payment'}</button>
+    </form>
+
+    <div className="table-frame">
+      <table className="records-table invoice-table">
         <thead>
           <tr>
             <th>Invoice number</th>
             <th>Type</th>
+            <th>Description / period</th>
             <th>Total (RWF)</th>
             <th>Paid (RWF)</th>
             <th>Balance (RWF)</th>
@@ -729,22 +802,23 @@ async function recordPayment(e: React.FormEvent<HTMLFormElement>) {
         <tbody>
           {invoices.length === 0 ? (
             <tr>
-              <td colSpan={6}>No invoices found yet.</td>
+              <td colSpan={7}>No invoices found yet.</td>
             </tr>
           ) : (
             invoices.map(invoice => (
               <tr key={invoice.id}>
-                <td>{invoice.invoice_number}</td>
-                <td>{invoice.invoice_type}</td>
-                <td>{Number(invoice.total_rwf).toLocaleString()}</td>
-                <td>{Number(invoice.paid_rwf).toLocaleString()}</td>
-                <td>
+                <td className="invoice-number">{invoice.invoice_number}</td>
+                <td className="type-cell">{invoice.invoice_type.replaceAll('_', ' ')}</td>
+                <td className="description-cell">{invoice.description}</td>
+                <td className="amount-cell">{Number(invoice.total_rwf).toLocaleString()}</td>
+                <td className="amount-cell">{Number(invoice.paid_rwf).toLocaleString()}</td>
+                <td className="amount-cell balance-cell">
                   {Math.max(
                     0,
                     Number(invoice.total_rwf) - Number(invoice.paid_rwf)
                   ).toLocaleString()}
                 </td>
-                <td>{invoice.status}</td>
+                <td><span className={`status-badge status-${invoice.status}`}>{invoice.status}</span></td>
               </tr>
             ))
           )}
@@ -783,14 +857,74 @@ async function recordPayment(e: React.FormEvent<HTMLFormElement>) {
   </article>
   <article className="panel" style={{ marginTop: 18 }}>
     <h2>Recent payments</h2>
-    <div style={{ overflowX: 'auto' }}><table><thead><tr><th>Receipt</th><th>Amount</th><th>Method</th><th>Reference</th><th>Date</th></tr></thead>
+    <div className="table-frame"><table className="records-table payment-table"><thead><tr><th>Receipt</th><th>Amount</th><th>Method</th><th>Reference</th><th>Date</th></tr></thead>
       <tbody>{payments.length === 0 ? <tr><td colSpan={5}>No payments recorded yet.</td></tr> : payments.map(p => <tr key={p.id}>
-        <td>{p.receipt_number}</td><td>{money(Number(p.amount_rwf))}</td><td>{p.method.replace('_', ' ')}</td><td>{p.reference_number || '—'}</td><td>{new Date(p.paid_at).toLocaleString()}</td>
+        <td className="invoice-number">{p.receipt_number}</td><td className="amount-cell">{money(Number(p.amount_rwf))}</td><td className="type-cell">{p.method.replaceAll('_', ' ')}</td><td>{p.reference_number || '—'}</td><td className="date-cell">{new Date(p.paid_at).toLocaleString()}</td>
       </tr>)}</tbody></table></div>
   </article>
 </>}
 
-{!['dashboard', 'tenants-vehicles', 'parking-sessions', 'invoices-debts', 'payments'].includes(section) && (
+{section === 'reports' && <>
+  <div className="welcome"><div><h2>Operations report</h2><p>Review payments, closed parking sessions, and invoices for a date range.</p></div></div>
+  <article className="panel">
+    <form className="report-filter" onSubmit={e => { e.preventDefault(); void loadReport(); }}>
+      <label>From<input type="date" required value={reportDates.start} onChange={e => setReportDates({ ...reportDates, start: e.target.value })} /></label>
+      <label>To<input type="date" required value={reportDates.end} onChange={e => setReportDates({ ...reportDates, end: e.target.value })} /></label>
+      <button className="primary" type="button" onClick={() => void loadReport()} disabled={reportLoading}>{reportLoading ? 'Loading report…' : 'Show report'}</button>
+    </form>
+    {!report && <p className="muted small" style={{ marginTop: 14 }}>Choose a date range and click “Show report” to display the results.</p>}
+  </article>
+  {report && <>
+    <div className="cards" style={{ marginTop: 18 }}>
+      <button type="button" className="metric report-metric" aria-expanded={reportDetails === 'payments'} onClick={() => setReportDetails(reportDetails === 'payments' ? null : 'payments')}><div className="metric-top"><span>Payments received · click to view</span><span className="metric-icon"><Wallet size={19} /></span></div><strong>{money(report.summary.collected_rwf)}</strong><p>{report.summary.payments_count} payment(s) in this period</p></button>
+      <button type="button" className="metric report-metric" aria-expanded={reportDetails === 'sessions'} onClick={() => setReportDetails(reportDetails === 'sessions' ? null : 'sessions')}><div className="metric-top"><span>Parking sessions closed · click to view</span><span className="metric-icon"><CarFront size={19} /></span></div><strong>{report.summary.closed_sessions}</strong><p>Session fees: {money(report.summary.session_fees_rwf)}</p></button>
+      <button type="button" className="metric report-metric" aria-expanded={reportDetails === 'invoices'} onClick={() => setReportDetails(reportDetails === 'invoices' ? null : 'invoices')}><div className="metric-top"><span>Invoices issued · click to view</span><span className="metric-icon"><Clock3 size={19} /></span></div><strong>{report.summary.invoices_count}</strong><p>Invoice value: {money(report.summary.invoiced_rwf)}</p></button>
+      <button type="button" className="metric report-metric" aria-expanded={reportDetails === 'outstanding'} onClick={() => setReportDetails(reportDetails === 'outstanding' ? null : 'outstanding')}><div className="metric-top"><span>Current outstanding balance · click to view</span><span className="metric-icon"><Wallet size={19} /></span></div><strong>{money(report.summary.current_outstanding_rwf)}</strong><p>All open invoices, as of now</p></button>
+    </div>
+    {reportDetails === 'payments' && <article className="panel" style={{ marginTop: 18 }}>
+      <h2>Payments received in this period</h2>
+      <div className="table-frame"><table className="records-table payment-table"><thead><tr><th>Receipt</th><th>Amount</th><th>Method</th><th>Reference</th><th>Date</th></tr></thead>
+        <tbody>{report.recent_payments.length === 0 ? <tr><td colSpan={5}>No payments in this date range.</td></tr> : report.recent_payments.map(row => <tr key={row.receipt_number}>
+          <td className="invoice-number">{row.receipt_number}</td><td className="amount-cell">{money(Number(row.amount_rwf))}</td><td className="type-cell">{row.method.replaceAll('_', ' ')}</td><td>{row.reference_number || '—'}</td><td className="date-cell">{new Date(row.paid_at).toLocaleString()}</td>
+        </tr>)}</tbody></table></div>
+    </article>}
+    {reportDetails === 'sessions' && <article className="panel" style={{ marginTop: 18 }}>
+      <h2>Parking sessions closed in this period</h2>
+      <div className="table-frame"><table className="records-table payment-table"><thead><tr><th>Session</th><th>Vehicle plate</th><th>Arrival</th><th>Departure</th><th>Fee (RWF)</th></tr></thead>
+        <tbody>{report.closed_session_rows.length === 0 ? <tr><td colSpan={5}>No sessions were closed in this date range.</td></tr> : report.closed_session_rows.map(row => <tr key={row.session_number}>
+          <td>#{row.session_number}</td><td className="invoice-number">{row.plate_number}</td><td className="date-cell">{new Date(row.started_at).toLocaleString()}</td><td className="date-cell">{new Date(row.ended_at).toLocaleString()}</td><td className="amount-cell">{money(Number(row.fee_rwf))}</td>
+        </tr>)}</tbody></table></div>
+    </article>}
+    {reportDetails === 'invoices' && <article className="panel" style={{ marginTop: 18 }}>
+      <h2>Invoices issued in this period</h2>
+      <div className="table-frame"><table className="records-table invoice-table"><thead><tr><th>Invoice number</th><th>Type</th><th>Description / period</th><th>Total (RWF)</th><th>Paid (RWF)</th><th>Balance (RWF)</th><th>Status</th></tr></thead>
+        <tbody>{report.issued_invoices.length === 0 ? <tr><td colSpan={7}>No invoices were issued in this date range.</td></tr> : report.issued_invoices.map(invoice => <tr key={invoice.invoice_number}>
+          <td className="invoice-number">{invoice.invoice_number}</td><td className="type-cell">{invoice.invoice_type.replaceAll('_', ' ')}</td><td className="description-cell">{invoice.description}</td>
+          <td className="amount-cell">{Number(invoice.total_rwf).toLocaleString()}</td><td className="amount-cell">{Number(invoice.paid_rwf).toLocaleString()}</td>
+          <td className="amount-cell balance-cell">{Math.max(0, Number(invoice.total_rwf) - Number(invoice.paid_rwf)).toLocaleString()}</td>
+          <td><span className={`status-badge status-${invoice.status}`}>{invoice.status}</span></td>
+        </tr>)}</tbody></table></div>
+    </article>}
+    {reportDetails === 'outstanding' && <article className="panel" style={{ marginTop: 18 }}>
+      <h2>Invoices with a balance still owed</h2>
+      <div className="table-frame"><table className="records-table invoice-table"><thead><tr><th>Invoice number</th><th>Type</th><th>Description</th><th>Total (RWF)</th><th>Paid (RWF)</th><th>Balance (RWF)</th><th>Due date</th><th>Status</th></tr></thead>
+        <tbody>{report.outstanding_invoices.length === 0 ? <tr><td colSpan={8}>There are no unpaid invoice balances.</td></tr> : report.outstanding_invoices.map(invoice => <tr key={invoice.invoice_number}>
+          <td className="invoice-number">{invoice.invoice_number}</td><td className="type-cell">{invoice.invoice_type.replaceAll('_', ' ')}</td><td className="description-cell">{invoice.description}</td>
+          <td className="amount-cell">{Number(invoice.total_rwf).toLocaleString()}</td><td className="amount-cell">{Number(invoice.paid_rwf).toLocaleString()}</td><td className="amount-cell balance-cell">{Math.max(0, Number(invoice.total_rwf) - Number(invoice.paid_rwf)).toLocaleString()}</td>
+          <td className="date-cell">{invoice.due_at ? new Date(invoice.due_at).toLocaleDateString() : '—'}</td><td><span className={`status-badge status-${invoice.status}`}>{invoice.status}</span></td>
+        </tr>)}</tbody></table></div>
+    </article>}
+    <article className="panel" style={{ marginTop: 18 }}>
+      <h2>Payments by method</h2>
+      <div className="table-frame"><table className="records-table payment-table"><thead><tr><th>Method</th><th>Number of payments</th><th>Amount received</th></tr></thead>
+        <tbody>{report.methods.length === 0 ? <tr><td colSpan={3}>No payments in this date range.</td></tr> : report.methods.map(row => <tr key={row.method}>
+          <td className="type-cell">{row.method.replaceAll('_', ' ')}</td><td>{Number(row.count).toLocaleString()}</td><td className="amount-cell">{money(Number(row.amount_rwf))}</td>
+        </tr>)}</tbody></table></div>
+    </article>
+  </>}
+</>}
+
+{!['dashboard', 'tenants-vehicles', 'parking-sessions', 'invoices-debts', 'payments', 'reports'].includes(section) && (
   <article className="panel">
     <h2>{nav.find(n => n.id === section)?.label}</h2>
     <p>This section has not been implemented yet. We will build and test it next.</p>
