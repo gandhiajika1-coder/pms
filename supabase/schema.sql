@@ -1,0 +1,2 @@
+-- Retired. The active schema is ../database/schema.sql for MySQL 8.
+-- Do not run this file.
